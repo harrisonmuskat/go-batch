@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -23,19 +24,27 @@ func enrichUser(userID int) User {
 	}
 }
 
-func sendSMS(User User, message string) error {
-	if rand.Float32() < 0.3 {
-		return fmt.Errorf("Failed to send SMS to %d", User.ID)
+func sendSMS(ctx context.Context, User User, message string) error {
+	select {
+	case <-time.After(100 * time.Millisecond):
+		if rand.Float32() < 0.3 {
+			return fmt.Errorf("Failed to send SMS to %d", User.ID)
+		}
+		fmt.Printf("Sent SMS to %d: %s\n", User.ID, message)
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("Failed to send SMS to %d: %v", User.ID, ctx.Err())
 	}
-	fmt.Printf("Sent SMS to %d: %s\n", User.ID, message)
-	return nil
 }
 
-func sendSMSWithRetry(User User, message string, maxRetries int) error {
+func sendSMSWithRetry(ctx context.Context, User User, message string, maxRetries int) error {
 	for attempts := 1; attempts <= maxRetries; attempts++ {
-		err := sendSMS(User, message)
+		err := sendSMS(ctx, User, message)
 		if err == nil {
 			return nil
+		}
+		if ctx.Err() != nil {
+			fmt.Printf("Context cancelled, failed to send SMS to %d: %v\n", User.ID, ctx.Err())
 		}
 		fmt.Printf("Failed to send SMS to %d, retry (%d)...\n", User.ID, attempts)
 		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
@@ -43,14 +52,18 @@ func sendSMSWithRetry(User User, message string, maxRetries int) error {
 	return fmt.Errorf("Failed to send SMS to %d after %d attempts", User.ID, maxRetries)
 }
 
-func processBatch(batch []User) {
+// Currently unused
+func processBatch(batch []User, timeout time.Duration) {
 	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
 	for _, user := range batch {
 		wg.Add(1)
 		go func(user User) {
 			defer wg.Done()
-			err := sendSMSWithRetry(user, "Hello, World!", 3)
+			err := sendSMSWithRetry(ctx, user, "Hello, World!", 3)
 			if err != nil {
 				fmt.Println(err)
 			}
@@ -60,22 +73,25 @@ func processBatch(batch []User) {
 	wg.Wait()
 }
 
-func worker(tasks <-chan User, wg *sync.WaitGroup) {
+func worker(ctx context.Context, tasks <-chan User, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for user := range tasks {
-		sendSMSWithRetry(user, "Hello, World!", 3)
+		sendSMSWithRetry(ctx, user, "Hello, World!", 3)
 	}
 }
 
-func processWithWorkerPools(users []User, workers int) time.Duration {
+func processWithWorkerPools(users []User, workers int, timeout time.Duration) time.Duration {
 	start := time.Now()
 	tasks := make(chan User, len(users))
 	var wg sync.WaitGroup
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go worker(tasks, &wg)
+		go worker(ctx, tasks, &wg)
 	}
 
 	for _, user := range users {
@@ -89,8 +105,12 @@ func processWithWorkerPools(users []User, workers int) time.Duration {
 	return time.Since(start)
 }
 
-func processWithBatches(users []User, batchSize int) time.Duration {
+func processWithBatches(users []User, batchSize int, timeout time.Duration) time.Duration {
 	start := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	for i := 0; i < len(users); i += batchSize {
 		end := i + batchSize
 		if end > len(users) {
@@ -99,7 +119,7 @@ func processWithBatches(users []User, batchSize int) time.Duration {
 		batch := users[i:end]
 
 		for _, user := range batch {
-			sendSMSWithRetry(user, "Hello, World!", 3)
+			sendSMSWithRetry(ctx, user, "Hello, World!", 3)
 		}
 	}
 
@@ -112,11 +132,13 @@ func main() {
 		users[i] = User{ID: i + 1, Name: fmt.Sprintf("User %d", i+1), Phone: fmt.Sprintf("123-456-%04d", i+1)}
 	}
 
+	timeout := 1000 * time.Millisecond
+
 	batchSize := 3
-	batchTime := processWithBatches(users, batchSize)
+	batchTime := processWithBatches(users, batchSize, timeout)
 
 	workers := 3
-	workerPoolTime := processWithWorkerPools(users, workers)
+	workerPoolTime := processWithWorkerPools(users, workers, timeout)
 
 	fmt.Printf("Batch processing took %v\n", batchTime)
 	fmt.Printf("Worker pool processing took %v\n", workerPoolTime)
