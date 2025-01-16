@@ -60,22 +60,64 @@ func processBatch(batch []User) {
 	wg.Wait()
 }
 
-func main() {
-	batch := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
-	batchSize := 3
+func worker(tasks <-chan User, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-	for i := 0; i < len(batch); i += batchSize {
-		end := i + batchSize
-		if end > len(batch) {
-			end = len(batch)
-		}
-		batch := batch[i:end]
-
-		var enrichedBatch []User
-		for _, userID := range batch {
-			enrichedUser := enrichUser(userID)
-			enrichedBatch = append(enrichedBatch, enrichedUser)
-		}
-		processBatch(enrichedBatch)
+	for user := range tasks {
+		sendSMSWithRetry(user, "Hello, World!", 3)
 	}
+}
+
+func processWithWorkerPools(users []User, workers int) time.Duration {
+	start := time.Now()
+	tasks := make(chan User, len(users))
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go worker(tasks, &wg)
+	}
+
+	for _, user := range users {
+		tasks <- user
+	}
+
+	close(tasks)
+
+	wg.Wait()
+
+	return time.Since(start)
+}
+
+func processWithBatches(users []User, batchSize int) time.Duration {
+	start := time.Now()
+	for i := 0; i < len(users); i += batchSize {
+		end := i + batchSize
+		if end > len(users) {
+			end = len(users)
+		}
+		batch := users[i:end]
+
+		for _, user := range batch {
+			sendSMSWithRetry(user, "Hello, World!", 3)
+		}
+	}
+
+	return time.Since(start)
+}
+
+func main() {
+	users := make([]User, 1000)
+	for i := range users {
+		users[i] = User{ID: i + 1, Name: fmt.Sprintf("User %d", i+1), Phone: fmt.Sprintf("123-456-%04d", i+1)}
+	}
+
+	batchSize := 3
+	batchTime := processWithBatches(users, batchSize)
+
+	workers := 3
+	workerPoolTime := processWithWorkerPools(users, workers)
+
+	fmt.Printf("Batch processing took %v\n", batchTime)
+	fmt.Printf("Worker pool processing took %v\n", workerPoolTime)
 }
